@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Worm Game - เกมหนอนไล่กินอาหาร</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #111; font-family: "Segoe UI", Tahoma, sans-serif; }
+  canvas { display: block; touch-action: none; }
+  #hud { position: fixed; top: 12px; left: 12px; color: #fff; font-size: 18px; text-shadow: 0 1px 3px #000; pointer-events: none; }
+  #bar { width: 180px; height: 10px; background: #fff3; border-radius: 5px; margin-top: 6px; overflow: hidden; }
+  #fill { height: 100%; width: 0; background: #4ade80; transition: width .15s; }
+  #menu { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+          background: #000b; color: #fff; text-align: center; gap: 10px; }
+  #menu h1 { margin: 0; font-size: 42px; }
+  #menu button { font-size: 20px; padding: 10px 32px; border: 0; border-radius: 8px; background: #4ade80; cursor: pointer; }
+  #menu button:hover { background: #22c55e; }
+  #msg { position: fixed; top: 30%; width: 100%; text-align: center; color: #fde047; font-size: 36px; font-weight: bold;
+         text-shadow: 0 2px 6px #000; opacity: 0; transition: opacity .4s; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  คะแนน: <span id="score">0</span> | เลเวล: <span id="level">1</span>
+  <div id="bar"><div id="fill"></div></div>
+</div>
+<div id="msg"></div>
+<div id="menu">
+  <h1>🐛 เกมหนอนไล่กินอาหาร</h1>
+  <p id="menuText">ขยับเมาส์ / นิ้วเพื่อบังคับทิศทาง<br>กินอาหารเพื่ออัพเลเวล หนอนจะตัวใหญ่ขึ้น<br>ห้ามชนตัวบอทหนอนอื่น และห้ามชนขอบแผนที่!</p>
+  <button id="startBtn">เริ่มเกม</button>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const WORLD = 3000;          // ขนาดแผนที่
+const FOOD_COUNT = 350;      // จำนวนอาหาร
+const BOT_COUNT = 8;         // จำนวนบอท
+const PTS_PER_LEVEL = 10;    // คะแนนที่ใช้ต่อ 1 เลเวล
+const COLORS = ['#f87171', '#fb923c', '#facc15', '#4ade80', '#22d3ee', '#60a5fa', '#c084fc', '#f472b6'];
+
+let player, bots, foods, mouse, running = false;
+let W, H;
+
+function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+addEventListener('resize', resize); resize();
+
+const rand = (a, b) => a + Math.random() * (b - a);
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+function makeFood(x, y, value) {
+  return { x: x ?? rand(30, WORLD - 30), y: y ?? rand(30, WORLD - 30),
+           v: value || 1, color: COLORS[Math.floor(Math.random() * COLORS.length)] };
+}
+
+function makeWorm(isBot) {
+  const x = rand(300, WORLD - 300), y = rand(300, WORLD - 300);
+  const w = { x, y, angle: rand(0, Math.PI * 2), target: 0, isBot,
+              score: isBot ? Math.floor(rand(0, 40)) : 0,
+              color: COLORS[Math.floor(Math.random() * COLORS.length)], segs: [], turnTimer: 0 };
+  w.target = w.angle;
+  updateStats(w);
+  for (let i = 0; i < w.len; i++) w.segs.push({ x, y });
+  return w;
+}
+
+// เลเวล / ขนาด / ความยาว คำนวณจากคะแนน
+function updateStats(w) {
+  w.level = 1 + Math.floor(w.score / PTS_PER_LEVEL);
+  w.r = Math.min(8 + w.level * 1.5, 32);
+  w.len = 12 + w.level * 4;
+  w.gap = w.r * 0.7;
+  w.speed = 2.6;
+}
+
+function grow(w, pts) {
+  const old = w.level;
+  w.score += pts;
+  updateStats(w);
+  while (w.segs.length < w.len) { const t = w.segs[w.segs.length - 1] || w; w.segs.push({ x: t.x, y: t.y }); }
+  if (!w.isBot && w.level > old) showMsg('LEVEL UP! เลเวล ' + w.level);
+}
+
+function showMsg(t) {
+  const m = document.getElementById('msg');
+  m.textContent = t; m.style.opacity = 1;
+  setTimeout(() => m.style.opacity = 0, 1200);
+}
+
+function killWorm(w) {
+  // หนอนตาย -> ทิ้งอาหาร
+  for (let i = 0; i < w.segs.length; i += 2) foods.push(makeFood(w.segs[i].x + rand(-8, 8), w.segs[i].y + rand(-8, 8), 2));
+  if (w === player) { running = false; gameOver(); }
+  else { bots[bots.indexOf(w)] = makeWorm(true); }
+}
+
+function moveWorm(w) {
+  // หมุนหัวไปทางเป้าหมายอย่างนุ่มนวล
+  let d = w.target - w.angle;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  w.angle += Math.max(-0.08, Math.min(0.08, d));
+  w.x += Math.cos(w.angle) * w.speed;
+  w.y += Math.sin(w.angle) * w.speed;
+  // ตัวหนอนตามหัว
+  let prev = w;
+  for (const s of w.segs) {
+    const dx = prev.x - s.x, dy = prev.y - s.y, dd = Math.hypot(dx, dy);
+    if (dd > w.gap) { s.x += dx / dd * (dd - w.gap); s.y += dy / dd * (dd - w.gap); }
+    prev = s;
+  }
+}
+
+function botAI(b) {
+  b.turnTimer--;
+  // 1) หลบกำแพง
+  const m = 150;
+  if (b.x < m || b.x > WORLD - m || b.y < m || b.y > WORLD - m) {
+    b.target = Math.atan2(WORLD / 2 - b.y, WORLD / 2 - b.x); return;
+  }
+  // 2) หลบตัวหนอนอื่น
+  for (const o of [player, ...bots]) {
+    if (o === b) continue;
+    for (let i = 0; i < o.segs.length; i += 3) {
+      if (Math.hypot(o.segs[i].x - b.x, o.segs[i].y - b.y) < b.r + o.r + 45) {
+        b.target = Math.atan2(b.y - o.segs[i].y, b.x - o.segs[i].x) + 0.6; return;
+      }
+    }
+  }
+  // 3) หาอาหารใกล้ๆ
+  let best = null, bd = 260;
+  for (const f of foods) { const d = Math.hypot(f.x - b.x, f.y - b.y); if (d < bd) { bd = d; best = f; } }
+  if (best) { b.target = Math.atan2(best.y - b.y, best.x - b.x); return; }
+  // 4) เดินสุ่ม
+  if (b.turnTimer <= 0) { b.target = b.angle + rand(-1, 1); b.turnTimer = rand(30, 90); }
+}
+
+function init() {
+  player = makeWorm(false);
+  player.x = player.y = WORLD / 2;
+  player.segs.forEach(s => { s.x = s.y = WORLD / 2; });
+  bots = Array.from({ length: BOT_COUNT }, () => makeWorm(true));
+  foods = Array.from({ length: FOOD_COUNT }, () => makeFood());
+  mouse = { x: W / 2, y: H / 2 };
+  running = true;
+  document.getElementById('menu').style.display = 'none';
+}
+
+function gameOver() {
+  document.getElementById('menuText').innerHTML = '💀 หนอนของคุณตายแล้ว!<br>คะแนน: ' + player.score + ' | เลเวล: ' + player.level;
+  document.getElementById('startBtn').textContent = 'เล่นอีกครั้ง';
+  document.getElementById('menu').style.display = 'flex';
+}
+
+function update() {
+  // ผู้เล่นหมุนตามเมาส์
+  player.target = Math.atan2(mouse.y - H / 2, mouse.x - W / 2);
+  moveWorm(player);
+  for (const b of bots) { botAI(b); moveWorm(b); }
+
+  const all = [player, ...bots];
+  for (const w of all) {
+    // กินอาหาร
+    for (let i = foods.length - 1; i >= 0; i--) {
+      const f = foods[i];
+      if (Math.hypot(f.x - w.x, f.y - w.y) < w.r + 8) { foods.splice(i, 1); grow(w, f.v); }
+    }
+  }
+  while (foods.length < FOOD_COUNT) foods.push(makeFood());
+
+  // ชนกำแพง / ชนตัวอื่น
+  for (const w of all.slice()) {
+    if (w.x < 0 || w.x > WORLD || w.y < 0 || w.y > WORLD) { killWorm(w); if (!running) return; continue; }
+    let hit = false;
+    for (const o of all) {
+      if (o === w) continue;
+      for (let i = 0; i < o.segs.length; i += 2) {
+        if (Math.hypot(o.segs[i].x - w.x, o.segs[i].y - w.y) < (w.r + o.r) * 0.8) { hit = true; break; }
+      }
+      if (hit) break;
+    }
+    if (hit) { killWorm(w); if (!running) return; }
+  }
+
+  document.getElementById('score').textContent = player.score;
+  document.getElementById('level').textContent = player.level;
+  document.getElementById('fill').style.width = ((player.score % PTS_PER_LEVEL) / PTS_PER_LEVEL * 100) + '%';
+}
+
+function drawWorm(w) {
+  for (let i = w.segs.length - 1; i >= 0; i--) {
+    const s = w.segs[i];
+    ctx.fillStyle = i % 2 ? w.color : shade(w.color);
+    ctx.beginPath(); ctx.arc(s.x, s.y, w.r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.fillStyle = w.color;
+  ctx.beginPath(); ctx.arc(w.x, w.y, w.r, 0, Math.PI * 2); ctx.fill();
+  // ตา
+  for (const side of [-1, 1]) {
+    const ex = w.x + Math.cos(w.angle + side * 0.7) * w.r * 0.6, ey = w.y + Math.sin(w.angle + side * 0.7) * w.r * 0.6;
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(ex, ey, w.r * 0.3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(ex + Math.cos(w.angle) * 2, ey + Math.sin(w.angle) * 2, w.r * 0.15, 0, Math.PI * 2); ctx.fill();
+  }
+}
+function shade(c) { return c + 'cc'; }
+
+function draw() {
+  ctx.fillStyle = '#1a1a2e'; ctx.fillRect(0, 0, W, H);
+  ctx.save();
+  ctx.translate(W / 2 - player.x, H / 2 - player.y);
+
+  // พื้นที่เล่น + เส้นตาราง
+  ctx.fillStyle = '#16213e'; ctx.fillRect(0, 0, WORLD, WORLD);
+  ctx.strokeStyle = '#ffffff10'; ctx.lineWidth = 1;
+  const x0 = Math.max(0, Math.floor((player.x - W / 2) / 100) * 100), x1 = Math.min(WORLD, player.x + W / 2);
+  const y0 = Math.max(0, Math.floor((player.y - H / 2) / 100) * 100), y1 = Math.min(WORLD, player.y + H / 2);
+  ctx.beginPath();
+  for (let x = x0; x <= x1; x += 100) { ctx.moveTo(x, y0); ctx.lineTo(x, y1); }
+  for (let y = y0; y <= y1; y += 100) { ctx.moveTo(x0, y); ctx.lineTo(x1, y); }
+  ctx.stroke();
+  ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 6; ctx.strokeRect(0, 0, WORLD, WORLD);
+
+  // อาหาร
+  for (const f of foods) {
+    if (Math.abs(f.x - player.x) > W / 2 + 20 || Math.abs(f.y - player.y) > H / 2 + 20) continue;
+    ctx.fillStyle = f.color;
+    ctx.beginPath(); ctx.arc(f.x, f.y, f.v > 1 ? 7 : 5, 0, Math.PI * 2); ctx.fill();
+  }
+  for (const b of bots) drawWorm(b);
+  drawWorm(player);
+  ctx.restore();
+}
+
+function loop() {
+  if (running) { update(); }
+  if (player) draw();
+  requestAnimationFrame(loop);
+}
+
+addEventListener('pointermove', e => { if (mouse) { mouse.x = e.clientX; mouse.y = e.clientY; } });
+addEventListener('pointerdown', e => { if (mouse) { mouse.x = e.clientX; mouse.y = e.clientY; } });
+document.getElementById('startBtn').onclick = init;
+loop();
+</script>
+</body>
+</html>
